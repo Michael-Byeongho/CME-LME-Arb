@@ -6,12 +6,13 @@ import re
 import io
 import plotly.express as px
 import datetime
+import plotly.graph_objects as go
 
 
 st.set_page_config(page_title="Copper Arbitrage Dashboard", layout="wide")
 
 st.title("📈 LME vs CME Copper Arbitrage Calculator")
-st.markdown("매일 갱신되는 LME Valuation PDF를 업로드하면 자동으로 CME 가격과 비교합니다.")
+st.markdown("LME Valuation PDF를 드래그 & 드롭하면 종가기준 CME 가격과 비교합니다.")
 
 # --- 1. LME 데이터 추출 함수 (PDF) ---
 def extract_lme_from_pdf(uploaded_file):
@@ -91,8 +92,12 @@ with col1:
     uploaded_file = st.file_uploader("📥 LME Valuation PDF 파일 업로드", type="pdf")
 with col2:
     # 사용자가 PDF에 해당하는 날짜를 직접 달력에서 선택할 수 있도록 합니다.
-    target_date = st.date_input("📅 비교할 CME종가 기준 날짜를 선택하세요", datetime.date(2026, 6, 17))
-
+    target_date = st.date_input(
+        "📅 비교할 CME종가 기준 날짜를 선택하세요 ", 
+        datetime.date(2026, 6, 17),
+        help="**기준 날짜 선택 가이드**\n\n업로드하시는 **LME Valuation PDF 파일의 기준일**과 동일한 날짜를 선택해 주세요. " \
+        "선택하신 날짜의 야후 파이낸스 CME 종가를 불러와 LME 가격과 비교합니다."
+    )
 if uploaded_file is not None:
     with st.spinner("PDF에서 LME 데이터를 추출하는 중입니다..."):
         df_lme = extract_lme_from_pdf(uploaded_file)
@@ -131,32 +136,102 @@ if uploaded_file is not None:
 # --- 4. 결과 시각화 ---
         st.subheader("📋 Price & Spread Table, 전일종가기준")
 
-        
-        st.dataframe(df_arb_clean.drop(columns=["Date", "Chart_Month"]).style.format({
+        styled_table = df_arb_clean.drop(columns=["Date", "Chart_Month"]).style.format({
             "LME_Price_MT": "${:,.2f}",
             "CME_Price_MT": "${:,.2f}",
             "Spread(CME-LME)": "${:,.2f}"
-        }), use_container_width=True)
+        })
         
+        # st.dataframe에 column_config를 추가하여 툴팁(물음표) 생성
+        st.dataframe(
+            styled_table, 
+            use_container_width=True,
+            column_config={
+                "Spread(CME-LME)": st.column_config.Column(
+                    label="Spread(CME-LME) ℹ️", # [핵심 추가] 화면에 보여질 컬럼명에 이모지 추가
+                    help="**Spread(CME-LME)란?**\n\n이 값이 양수이면 Arb가 열린 것"
+                )
+            }
+        )
+
         st.divider()
 
         st.subheader("📊 LME vs CME Forward Curve ($/MT)")
         
-        # [핵심 수정] Plotly를 사용하여 Y축 자동 최적화 그래프 그리기
-        fig = px.line(
-            df_arb_clean, 
-            x="Chart_Month", 
-            y=["LME_Price_MT", "CME_Price_MT"],
-            color_discrete_sequence=["#FF0000", "#0000FF"], # LME 빨강, CME 파랑
-            labels={"value": "Price ($/MT)", "Chart_Month": "Month", "variable": "Market"}
-        )
+        # Plotly Graph Objects를 이용한 고급 시각화
+        fig = go.Figure()
+
+        # 1. CME 라인 (파란색, 위에 데이터 레이블 표시)
+        fig.add_trace(go.Scatter(
+            x=df_arb_clean["Chart_Month"],
+            y=df_arb_clean["CME_Price_MT"],
+            mode="lines+markers+text",
+            name="CME Price",
+            line=dict(color="#0000FF", width=2),
+            text=df_arb_clean["CME_Price_MT"].apply(lambda x: f"${x:,.0f}"),
+            textposition="top center",
+            textfont=dict(color="#0000FF")
+        ))
+
+        # 2. LME 라인 (빨간색, 아래에 데이터 레이블 표시)
+        fig.add_trace(go.Scatter(
+            x=df_arb_clean["Chart_Month"],
+            y=df_arb_clean["LME_Price_MT"],
+            mode="lines+markers+text",
+            name="LME Price",
+            line=dict(color="#FF0000", width=2),
+            text=df_arb_clean["LME_Price_MT"].apply(lambda x: f"${x:,.0f}"),
+            textposition="bottom center",
+            textfont=dict(color="#FF0000")
+        ))
+
+        # 3. 그 사이의 Gap (Spread) 숫자로 표현
+        # CME와 LME 가격의 정확히 중간 지점(y축)을 계산하여 그 위치에 Gap 텍스트를 띄웁니다.
+        mid_y = (df_arb_clean["CME_Price_MT"] + df_arb_clean["LME_Price_MT"]) / 2
         
-        # 마우스를 올렸을 때 두 가격이 같은 선상에서 동시에 보이도록 설정
-        fig.update_layout(hovermode="x unified")
+        fig.add_trace(go.Scatter(
+            x=df_arb_clean["Chart_Month"],
+            y=mid_y,
+            mode="text",
+            name="Spread Gap",
+            text=df_arb_clean["Spread(CME-LME)"].apply(lambda x: f"Gap: ${x:,.0f}"),
+            textposition="middle center",
+            textfont=dict(color="#2ca02c", size=12, weight="bold"),
+            showlegend=False # 범례에서는 생략
+        ))
+
+        # Y축 스케일링 최적화 (보조축 Gap 축소 효과)
+        # 데이터의 최소/최대값을 구한 뒤 위아래로 딱 10%의 여백만 남기도록 강제 줌(Zoom) 설정
+        y_min = df_arb_clean[["LME_Price_MT", "CME_Price_MT"]].min().min()
+        y_max = df_arb_clean[["LME_Price_MT", "CME_Price_MT"]].max().max()
+        margin = (y_max - y_min) * 0.1
+        if margin == 0: margin = 100 # 두 가격이 완전히 같을 경우의 방어 로직
+
+        fig.update_layout(
+            hovermode="x unified",
+            yaxis=dict(
+                title="Price ($/MT)",
+                range=[y_min - margin, y_max + margin], # 타이트한 Y축 적용
+                tickformat="$,.0f"
+            ),
+            legend=dict(
+                orientation="h", # 범례를 가로로 눕혀서 공간 확보
+                yanchor="bottom", 
+                y=1.02, 
+                xanchor="right", 
+                x=1
+            ),
+            margin=dict(t=50) # 위쪽 여백 확보 (레이블 잘림 방지)
+        )
         
         st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
+
+
+
+
+
 # --- 5. LME vs CME 교차 월물 아비트라지 매트릭스 ---
         st.subheader("🧮 Cross-Month Arbitrage Matrix (CME - LME, $/MT)")
         st.markdown(
